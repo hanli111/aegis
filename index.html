@@ -1,0 +1,891 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AEGIS — Live Ontology-Driven Response Console</title>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<style>
+  html, body, #root { height: 100%; margin: 0; }
+  body { background: #0B0F14; color: #C9D3DF; font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; }
+  #boot { height: 100%; display: grid; place-items: center; font-size: 13px; letter-spacing: 1px; color: #48515D; }
+  .opx-scroll { scrollbar-width: thin; scrollbar-color: #2C3947 transparent; }
+  .opx-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
+  .opx-scroll::-webkit-scrollbar-thumb { background: #2C3947; border-radius: 8px; }
+  .opx-scroll::-webkit-scrollbar-track { background: transparent; }
+  .opx-btn { cursor: pointer; border: none; transition: filter .12s, transform .06s, background .12s; }
+  .opx-btn:hover { filter: brightness(1.13); }
+  .opx-btn:active { transform: translateY(1px); }
+  .opx-row { cursor: pointer; transition: background .12s; }
+  .opx-row:hover { background: rgba(255,255,255,.035); }
+  .opx-chip { cursor: pointer; transition: filter .12s; }
+  .opx-chip:hover { filter: brightness(1.25); }
+  .opx-fade { animation: opxfade .25s ease-out; }
+  @keyframes opxfade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+  .opx-pulse { transform-origin: center; animation: opxpulse 2.4s ease-out infinite; }
+  @keyframes opxpulse { 0% { transform: scale(1); opacity: .5; } 70% { transform: scale(2.6); opacity: 0; } 100% { opacity: 0; } }
+  .opx-btn:focus-visible, .opx-row:focus-visible, .opx-chip:focus-visible { outline: 2px solid #8E84FF; outline-offset: 2px; }
+  /* leaflet theming */
+  .leaflet-container { background: #0d141d; font-family: inherit; }
+  .leaflet-bar a, .leaflet-bar a:hover { background: #131A23; color: #C9D3DF; border-bottom-color: #212B37; }
+  .leaflet-control-attribution { background: rgba(15,20,27,.72) !important; color: #48515D !important; }
+  .leaflet-control-attribution a { color: #6B7888 !important; }
+  .aegis-div { background: none !important; border: none !important; }
+  .aegis-anim { transition: transform 1.15s linear; }
+  @media (prefers-reduced-motion: reduce) { .opx-pulse { animation: none !important; } .aegis-anim { transition: none !important; } }
+</style>
+
+<!-- bare imports resolve to CDN ES modules; react pinned so react-dom + lucide share one copy -->
+<script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@18.3.1",
+    "react-dom/client": "https://esm.sh/react-dom@18.3.1/client?deps=react@18.3.1",
+    "lucide-react": "https://esm.sh/lucide-react@0.383.0?deps=react@18.3.1"
+  }
+}
+</script>
+</head>
+<body>
+<div id="root"><div id="boot">CONNECTING TO NASA EONET…</div></div>
+
+<!-- data-type="module" => Babel transforms JSX, leaves imports for the import map. data-presets="react" => JSX only. -->
+<script type="text/babel" data-type="module" data-presets="react">
+import { createRoot } from "react-dom/client";
+import React, { useReducer, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Flame, Building2, HeartPulse, Biohazard, Radio, Satellite, Truck, Plane,
+  Wind, Users, AlertTriangle, ShieldAlert, Activity, CheckCircle2, Clock,
+  MapPin, Database, Cpu, ChevronRight, Play, Pause, RotateCcw, Crosshair,
+  Navigation, GitBranch, Building, Radar, RefreshCw, Wifi, ArrowRight, Layers
+} from "lucide-react";
+
+/* ============================================================
+   AEGIS — an ontology-driven response console.
+   Built in the spirit of Foundry (the Ontology + write-back)
+   and AIP (an agent grounded in the object graph).
+   LIVE: wildfire incidents from NASA EONET (keyless, CORS-ok).
+   REPRESENTATIVE: units / facilities / population zones stand
+   in for an agency's internal systems (CAD, GIS, census).
+   ============================================================ */
+
+const C = {
+  ink:"#0B0F14", panel:"#0F141B", panel2:"#131A23", raise:"#19222E",
+  line:"#212B37", line2:"#2C3947", text:"#C9D3DF", mute:"#76828F", faint:"#48515D",
+  red:"#FF5147", amber:"#FFB020", blue:"#4DA3FF", green:"#33D6A4", violet:"#8E84FF",
+  redDim:"rgba(255,81,71,.13)", amberDim:"rgba(255,176,32,.13)",
+  greenDim:"rgba(51,214,164,.12)", blueDim:"rgba(77,163,255,.12)", violetDim:"rgba(142,132,255,.14)",
+};
+
+const TYPE_META = {
+  wildfire:  { icon: Flame,      label: "Wildfire",       cap: "wildland" },
+  structure: { icon: Building2,  label: "Structure fire", cap: "structure" },
+  medical:   { icon: HeartPulse, label: "Mass casualty",  cap: "medical" },
+  hazmat:    { icon: Biohazard,  label: "Hazmat",         cap: "hazmat" },
+};
+const UNIT_META = {
+  engine:{ icon:Truck, label:"Engine" }, ladder:{ icon:Truck, label:"Ladder" },
+  medic:{ icon:HeartPulse, label:"Medic" }, air:{ icon:Plane, label:"Air" }, hazmat:{ icon:Biohazard, label:"Hazmat" },
+};
+const SENSOR_META = {
+  satellite:{ icon:Satellite, label:"NASA EONET · VIIRS/MODIS" },
+  dispatch:{ icon:Radio, label:"911 / CAD dispatch" },
+  "air-quality":{ icon:Wind, label:"Air quality network" },
+  traffic:{ icon:Navigation, label:"Traffic telemetry" },
+  gis:{ icon:Layers, label:"Agency GIS / census" },
+};
+const FAC_META = {
+  hospital:{ icon:Building2, label:"Hospital" }, shelter:{ icon:Building, label:"Shelter" },
+  staging:{ icon:MapPin, label:"Staging" }, clinic:{ icon:HeartPulse, label:"Clinic" },
+};
+
+let _uid = 0; const uid = () => (++_uid).toString(36);
+const RE = 6371;
+const toRad = d => d * Math.PI / 180;
+function hav(a, b) {
+  const dLat = toRad(b.lat - a.lat), dLng = toRad(b.lng - a.lng);
+  const x = Math.sin(dLat/2)**2 + Math.cos(toRad(a.lat))*Math.cos(toRad(b.lat))*Math.sin(dLng/2)**2;
+  return 2 * RE * Math.asin(Math.sqrt(x));
+}
+const offset = (c, dxKm, dyKm) => ({ lat: c.lat + dyKm/111, lng: c.lng + dxKm/(111*Math.cos(toRad(c.lat))) });
+const fmtClock = (t) => { const m = 14*60 + t; return `${String(Math.floor(m/60)%24).padStart(2,"0")}:${String(m%60).padStart(2,"0")}`; };
+const sevColor = (s) => (s >= 4 ? C.red : s >= 3 ? C.amber : C.blue);
+const sevFromAcres = (a) => (a == null ? 3 : a < 50 ? 1 : a < 1000 ? 2 : a < 10000 ? 3 : a < 50000 ? 4 : 5);
+const fmtDate = (iso) => { try { return new Date(iso).toLocaleDateString(undefined,{month:"short",day:"numeric"}); } catch { return "—"; } };
+
+/* ---- live feed: NASA EONET wildfires ----------------------------- */
+const FALLBACK_FIRES = [
+  { id:"CACHE-01", title:"Ridge Complex, Butte, California",     lat:39.86, lng:-121.62, acres:42100, date:new Date(Date.now()-2*864e5).toISOString(), source:{ id:"IRWIN", url:"https://irwin.doi.gov" } },
+  { id:"CACHE-02", title:"Mill Canyon, Tehama, California",      lat:40.05, lng:-121.98, acres:9400,  date:new Date(Date.now()-1*864e5).toISOString(), source:{ id:"InciWeb", url:"https://inciweb.wildfire.gov" } },
+  { id:"CACHE-03", title:"Granite Fire, Plumas, California",     lat:39.94, lng:-121.31, acres:3100,  date:new Date(Date.now()-3*864e5).toISOString(), source:{ id:"IRWIN", url:"https://irwin.doi.gov" } },
+  { id:"CACHE-04", title:"Oak Flat, Glenn, California",          lat:39.62, lng:-122.05, acres:780,   date:new Date(Date.now()-1*864e5).toISOString(), source:{ id:"IRWIN", url:"https://irwin.doi.gov" } },
+  { id:"CACHE-05", title:"Cedar Spring, Shasta, California",     lat:40.31, lng:-121.74, acres:21500, date:new Date(Date.now()-2*864e5).toISOString(), source:{ id:"InciWeb", url:"https://inciweb.wildfire.gov" } },
+  { id:"CACHE-06", title:"Lower Bench, Lassen, California",      lat:40.18, lng:-121.18, acres:560,   date:new Date(Date.now()-4*864e5).toISOString(), source:{ id:"IRWIN", url:"https://irwin.doi.gov" } },
+];
+
+async function fetchFires() {
+  const url = "https://eonet.gsfc.nasa.gov/api/v3/events?status=open&category=wildfires&days=30&limit=200";
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(), 9000);
+  try {
+    const r = await fetch(url, { signal: ctrl.signal });
+    clearTimeout(to);
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const data = await r.json();
+    const fires = (data.events || []).map(ev => {
+      const geom = ev.geometry && ev.geometry[ev.geometry.length - 1];
+      if (!geom || geom.type !== "Point" || !geom.coordinates) return null;
+      const [lng, lat] = geom.coordinates;
+      if (typeof lat !== "number" || typeof lng !== "number") return null;
+      return { id: ev.id, title: ev.title || ev.id, lat, lng,
+        acres: geom.magnitudeUnit === "acres" ? geom.magnitudeValue : null,
+        date: geom.date, source: (ev.sources && ev.sources[0]) || null };
+    }).filter(Boolean);
+    if (!fires.length) throw new Error("no open events");
+    return { fires, mode: "live" };
+  } catch (e) {
+    clearTimeout(to);
+    return { fires: FALLBACK_FIRES, mode: "cache", error: String(e.message || e) };
+  }
+}
+
+function densestCluster(fires, radiusKm = 280) {
+  if (!fires.length) return [];
+  let best = [];
+  for (const f of fires) {
+    const near = fires.filter(g => hav(f, g) <= radiusKm);
+    if (near.length > best.length) best = near;
+  }
+  return best;
+}
+function regionOf(fires) {
+  const states = fires.map(f => { const p = (f.title || "").split(","); return p.length ? p[p.length - 1].trim() : null; }).filter(Boolean);
+  if (!states.length) return "the active theater";
+  const counts = {}; states.forEach(s => counts[s] = (counts[s] || 0) + 1);
+  return Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
+}
+const fireName = (title) => (title || "").split(",")[0].replace(/\b(wildfire|fire|complex)\b/gi, "").trim() || (title || "").split(",")[0];
+
+/* build the world: real fires + a representative operational layer around them */
+function buildWorld(firesResult, prev) {
+  const cluster = densestCluster(firesResult.fires).slice().sort((a, b) => (b.acres || 0) - (a.acres || 0)).slice(0, 9);
+  const use = cluster.length ? cluster : firesResult.fires.slice(0, 6);
+  const centroid = { lat: use.reduce((a, f) => a + f.lat, 0) / use.length, lng: use.reduce((a, f) => a + f.lng, 0) / use.length };
+  const region = regionOf(use);
+
+  // representative population zones: two pinned near the biggest fires, four around the centroid
+  const names = ["Cedar Heights", "Summit Ridge", "Old Town", "Mill Creek", "Riverside", "Harbor Flats", "Pine Hollow", "North Bend"];
+  const zones = [];
+  use.slice(0, 2).forEach((f, i) => {
+    const c = offset({ lat: f.lat, lng: f.lng }, (i ? 6 : -6), (i ? 5 : -5));
+    zones.push({ id: "z" + i, name: names[i], pop: [3400, 2100][i], lat: c.lat, lng: c.lng, rKm: 3.4, risk: "high", evac: "none", orderedTick: null, evacFacility: null });
+  });
+  [[10, 8, 5800, "med"], [-9, -12, 2900, "med"], [13, -10, 4200, "med"], [-2, 16, 6500, "low"]].forEach((q, k) => {
+    const c = offset(centroid, q[0], q[1]);
+    zones.push({ id: "z" + (k + 2), name: names[k + 2], pop: q[2], lat: c.lat, lng: c.lng, rKm: 3.8, risk: q[3], evac: "none", orderedTick: null, evacFacility: null });
+  });
+
+  const facilities = [
+    { id:"fac-gh", name:"General Hospital", kind:"hospital", cap:120, load:64, ...offset(centroid, 2, 4) },
+    { id:"fac-mm", name:"Mercy Medical",    kind:"hospital", cap:80,  load:51, ...offset(centroid, 14, -2) },
+    { id:"fac-ls", name:"Lincoln Shelter",  kind:"shelter",  cap:800, load:120,...offset(centroid, -8, 3) },
+    { id:"fac-cs", name:"County Staging",   kind:"staging",  cap:0,   load:0,  ...offset(centroid, 6, 12) },
+    { id:"fac-mc", name:"Memorial Clinic",  kind:"clinic",   cap:40,  load:22, ...offset(centroid, 11, -14) },
+  ];
+
+  const units = [
+    { id:"ENG-3",  kind:"engine", caps:["structure","wildland"], speed:1.2, ...offset(centroid, -6, 6) },
+    { id:"ENG-7",  kind:"engine", caps:["structure","wildland"], speed:1.2, ...offset(centroid, 12, 4) },
+    { id:"ENG-12", kind:"engine", caps:["structure","wildland"], speed:1.2, ...offset(centroid, 2, -8) },
+    { id:"LAD-2",  kind:"ladder", caps:["structure"],            speed:1.1, ...offset(centroid, -2, 2) },
+    { id:"MED-5",  kind:"medic",  caps:["medical"],              speed:1.3, ...offset(centroid, 0, 0) },
+    { id:"MED-9",  kind:"medic",  caps:["medical"],              speed:1.3, ...offset(centroid, 16, 6) },
+    { id:"HELO-1", kind:"air",    caps:["wildland","air","medevac"], speed:3.2, ...offset(centroid, 8, -4) },
+    { id:"HZM-1",  kind:"hazmat", caps:["hazmat"],               speed:1.0, ...offset(centroid, 4, 10) },
+  ].map(u => ({ ...u, status: "available", assignment: null }));
+
+  // real wildfire incidents
+  let incidents = use.map(f => {
+    const threatens = zones.filter(z => hav(z, f) <= 12).map(z => z.id);
+    const pop = threatens.reduce((a, zid) => a + (zones.find(z => z.id === zid)?.pop || 0), 0);
+    return {
+      id: f.id, name: fireName(f.title), title: f.title, type: "wildfire",
+      sev: sevFromAcres(f.acres), lat: f.lat, lng: f.lng,
+      acres: f.acres, date: f.date, source: f.source, provenance: "live",
+      popAtRisk: pop || Math.round(Math.min(f.acres || 800, 30000) / 4),
+      detectedTick: 0, arrivedTick: null, containment: 0, status: "active",
+      sources: ["EONET"], threatens,
+    };
+  });
+
+  // representative internal-CAD incidents (shows external feed fused with internal 911/CAD)
+  const cadZone = zones[2];
+  incidents.push(
+    { id:"CAD-204", name:"Warehouse fire", type:"structure", sev:2, ...offset(centroid, 9, 7), provenance:"rep", popAtRisk:600, detectedTick:0, arrivedTick:null, containment:0, status:"active", sources:["C911","AQ-1"], threatens:[cadZone.id] },
+    { id:"CAD-207", name:"Highway MCI", type:"medical", sev:3, ...offset(centroid, 13, -9), provenance:"rep", popAtRisk:14, detectedTick:0, arrivedTick:null, containment:0, status:"active", sources:["C911","TRAF-1"], threatens:[] },
+  );
+
+  const sensors = [
+    { id:"EONET", kind:"satellite", live:true, reading:`${use.length} active fires` },
+    { id:"C911",  kind:"dispatch", live:false, reading:"6 active calls" },
+    { id:"AQ-1",  kind:"air-quality", live:false, reading:"PM2.5 elevated" },
+    { id:"TRAF-1",kind:"traffic", live:false, reading:"congestion +40%" },
+    { id:"GIS-1", kind:"gis", live:false, reading:"census + parcels" },
+  ];
+
+  const feed = { mode: firesResult.mode, count: firesResult.fires.length, used: use.length, region, syncedAt: Date.now(), centroid, error: firesResult.error || null };
+  return { ...(prev || {}), clock: 0, running: true, selected: null, log: [], firedEvents: [], phase: "brief", incidents, units, facilities, zones, sensors, feed };
+}
+
+/* ---- ontology queries -------------------------------------------- */
+const activeFires = (s) => s.incidents.filter(i => i.status === "active" && (i.type === "wildfire" || i.type === "structure"));
+const zoneThreatenedBy = (s, z) => activeFires(s).filter(i => i.threatens.includes(z.id) || hav(z, i) < 12);
+const isThreatened = (s, z) => zoneThreatenedBy(s, z).length > 0;
+function nearestFacility(s, pt, kinds) {
+  const cand = s.facilities.filter(f => !kinds || kinds.includes(f.kind));
+  return cand.reduce((b, f) => (b && hav(b, pt) < hav(f, pt) ? b : f), null);
+}
+
+function applyWind(incidents, zones, snap) {
+  const fires = incidents.filter(i => i.status === "active" && i.type === "wildfire");
+  if (!fires.length) return { incidents, text: null };
+  const target = fires.reduce((a, b) => (a.sev >= b.sev ? a : b));
+  const threatened = new Set(); zones.forEach(z => { if (zoneThreatenedBy(snap, z).length) threatened.add(z.id); });
+  const cands = zones.filter(z => z.risk !== "low" && !threatened.has(z.id) && !target.threatens.includes(z.id)).sort((a, b) => hav(a, target) - hav(b, target));
+  const next = incidents.map(i => {
+    if (i.id !== target.id) return i;
+    const ni = { ...i, sev: Math.min(5, i.sev + 1), popAtRisk: Math.round(i.popAtRisk * 1.5) };
+    if (cands[0]) ni.threatens = [...i.threatens, cands[0].id];
+    return ni;
+  });
+  return { incidents: next, text: `Red-flag wind shift · ${target.name} spreading${cands[0] ? ` toward ${cands[0].name}` : ""} · severity ${Math.min(5, target.sev + 1)}` };
+}
+
+/* ---- the AIP agent: transparent reasoning over the ontology ------ */
+function genRecs(s) {
+  const recs = [];
+  s.incidents.filter(i => i.status === "active").forEach(inc => {
+    const cap = TYPE_META[inc.type].cap;
+    const handled = s.units.some(u => u.assignment === inc.id && u.caps.includes(cap) && (u.status === "enroute" || u.status === "onscene"));
+    if (handled) return;
+    const cands = s.units.filter(u => u.status === "available" && u.caps.includes(cap));
+    const zNames = inc.threatens.map(zid => s.zones.find(z => z.id === zid)).filter(Boolean);
+    const popLabel = zNames.length
+      ? `${zNames.map(z => z.name).join(", ")} (${zNames.reduce((a, z) => a + z.pop, 0).toLocaleString()} residents)`
+      : `${inc.popAtRisk.toLocaleString()} exposed`;
+    if (!cands.length) {
+      recs.push({ id:"blk-"+inc.id, kind:"dispatch", blocked:true, incidentId:inc.id, urgency: inc.sev*(1+inc.popAtRisk/1500)*2,
+        title:`No ${cap}-capable unit available for ${inc.name}`,
+        why:`${TYPE_META[inc.type].label} · sev ${inc.sev} · threatening ${popLabel}. All matching units committed — request mutual aid.`,
+        objs:[{ type:"incident", id:inc.id }, ...zNames.map(z => ({ type:"zone", id:z.id }))] });
+      return;
+    }
+    const best = cands.map(u => { const d = hav(u, inc); const eta = Math.max(1, Math.round(d / u.speed)); return { u, d, eta, score: (inc.sev * (1 + inc.popAtRisk / 2000)) / eta }; })
+      .sort((a, b) => b.score - a.score)[0];
+    recs.push({ id:"dsp-"+inc.id, kind:"dispatch", incidentId:inc.id, unitId:best.u.id, urgency: best.score + inc.sev,
+      title:`Dispatch ${best.u.id} → ${inc.name}`,
+      why:`${best.d.toFixed(1)} km · ETA ${best.eta} min · ${TYPE_META[inc.type].label} sev ${inc.sev} threatening ${popLabel}. ${cap}-capable, closest available unit.`,
+      objs:[{ type:"incident", id:inc.id }, { type:"unit", id:best.u.id }, ...zNames.map(z => ({ type:"zone", id:z.id }))] });
+  });
+  s.zones.forEach(z => {
+    if (z.evac !== "none") return;
+    const threats = zoneThreatenedBy(s, z).filter(i => i.sev >= 4);
+    if (!threats.length) return;
+    const worst = threats.reduce((a, b) => (a.sev >= b.sev ? a : b));
+    const fac = nearestFacility(s, z, ["shelter", "hospital"]);
+    recs.push({ id:"evc-"+z.id, kind:"evacuate", zoneId:z.id, facilityId:fac?.id, urgency:(z.pop/800)*worst.sev,
+      title:`Order evacuation · ${z.name}`,
+      why:`${z.pop.toLocaleString()} residents · threatened by ${worst.name} (${TYPE_META[worst.type].label}, sev ${worst.sev}). Route to ${fac?.name} (cap ${fac?.cap.toLocaleString()}).`,
+      objs:[{ type:"zone", id:z.id }, { type:"incident", id:worst.id }, ...(fac ? [{ type:"facility", id:fac.id }] : [])] });
+  });
+  return recs.sort((a, b) => b.urgency - a.urgency).slice(0, 6);
+}
+
+/* ---- reducer / simulation ---------------------------------------- */
+function reducer(s, a) {
+  switch (a.type) {
+    case "SET_WORLD": return a.world;
+    case "ENTER": return { ...s, phase: "ops" };
+    case "TOGGLE_RUN": return { ...s, running: !s.running };
+    case "RESET": return { ...buildWorld({ fires: s.__rawFires || FALLBACK_FIRES, mode: s.feed.mode, error: s.feed.error }, s), phase: "ops", __rawFires: s.__rawFires };
+    case "SELECT": { const same = s.selected && s.selected.type === a.sel.type && s.selected.id === a.sel.id; return { ...s, selected: same ? null : a.sel }; }
+    case "DISPATCH": {
+      const inc = s.incidents.find(i => i.id === a.incidentId);
+      const units = s.units.map(u => u.id === a.unitId ? { ...u, status: "enroute", assignment: a.incidentId } : u);
+      const log = [{ id:uid(), tick:s.clock, kind:"dispatch", text:`Dispatched ${a.unitId} → ${inc.name} · ${TYPE_META[inc.type].label}` }, ...s.log].slice(0, 60);
+      return { ...s, units, log, selected: { type: "incident", id: a.incidentId } };
+    }
+    case "EVACUATE": {
+      const z = s.zones.find(z => z.id === a.zoneId); const fac = s.facilities.find(f => f.id === a.facilityId);
+      const zones = s.zones.map(zz => zz.id === a.zoneId ? { ...zz, evac: "ordered", orderedTick: s.clock, evacFacility: a.facilityId } : zz);
+      const log = [{ id:uid(), tick:s.clock, kind:"evac", text:`Evacuation ordered · ${z.name} → ${fac?.name}` }, ...s.log].slice(0, 60);
+      return { ...s, zones, log };
+    }
+    case "WIND": {
+      const r = applyWind(s.incidents, s.zones, s);
+      const log = r.text ? [{ id:uid(), tick:s.clock, kind:"wind", text:r.text }, ...s.log].slice(0, 60) : s.log;
+      return { ...s, incidents: r.incidents, log };
+    }
+    case "RESYNC": {
+      // append any newly-detected live fires as new incidents, refresh feed meta
+      const have = new Set(s.incidents.map(i => i.id));
+      const fresh = (a.fires || []).filter(f => !have.has(f.id));
+      const zones = s.zones;
+      const newInc = fresh.slice(0, 4).map(f => {
+        const threatens = zones.filter(z => hav(z, f) <= 12).map(z => z.id);
+        const pop = threatens.reduce((acc, zid) => acc + (zones.find(z => z.id === zid)?.pop || 0), 0);
+        return { id:f.id, name:fireName(f.title), title:f.title, type:"wildfire", sev:sevFromAcres(f.acres), lat:f.lat, lng:f.lng,
+          acres:f.acres, date:f.date, source:f.source, provenance:"live", popAtRisk: pop || Math.round(Math.min(f.acres || 800, 30000)/4),
+          detectedTick:s.clock, arrivedTick:null, containment:0, status:"active", sources:["EONET"], threatens };
+      });
+      const log = [{ id:uid(), tick:s.clock, kind:"detect", text: newInc.length ? `EONET resync · ${newInc.length} new wildfire${newInc.length>1?"s":""} ingested` : `EONET resync · no new fires` }, ...s.log].slice(0, 60);
+      return { ...s, incidents: [...s.incidents, ...newInc], log,
+        feed: { ...s.feed, mode: a.mode, count: a.count, syncedAt: Date.now(), error: a.error || null } };
+    }
+    case "TICK": {
+      const clock = s.clock + 1; let log = s.log;
+      const add = (kind, text) => { log = [{ id:uid(), tick:clock, kind, text }, ...log].slice(0, 60); };
+
+      let units = s.units.map(u => {
+        if (u.status === "enroute" && u.assignment) {
+          const inc = s.incidents.find(i => i.id === u.assignment);
+          if (!inc || inc.status !== "active") return { ...u, status: "available", assignment: null };
+          const d = hav(u, inc);
+          if (d <= 0.6) return { ...u, lat: inc.lat, lng: inc.lng, status: "onscene" };
+          const t = Math.min(1, (u.speed) / d);
+          return { ...u, lat: u.lat + (inc.lat - u.lat) * t, lng: u.lng + (inc.lng - u.lng) * t };
+        }
+        return u;
+      });
+
+      let incidents = s.incidents.map(inc => {
+        if (inc.status !== "active") return inc;
+        const onscene = units.filter(u => u.assignment === inc.id && u.status === "onscene");
+        let ni = { ...inc };
+        if (onscene.length) {
+          if (ni.arrivedTick == null) { ni.arrivedTick = clock; add("arrive", `${onscene[0].id} on scene · ${ni.name}`); }
+          ni.containment = Math.min(100, ni.containment + Math.max(8, 26 * onscene.length - ni.sev * 4));
+          if (ni.containment >= 100) { ni.status = "contained"; ni.popAtRisk = 0; add("contain", `${ni.name} contained · threat cleared`); }
+        } else {
+          ni.popAtRisk = Math.round(ni.popAtRisk * 1.05);
+          if (clock % 4 === 0 && ni.sev < 5 && (ni.type === "wildfire" || ni.type === "structure")) { ni.sev += 1; if (ni.acres) ni.acres = Math.round(ni.acres * 1.25); add("escalate", `${ni.name} escalated to severity ${ni.sev}`); }
+        }
+        return ni;
+      });
+
+      units = units.map(u => { if (u.assignment) { const inc = incidents.find(i => i.id === u.assignment); if (!inc || inc.status !== "active") return { ...u, status: "available", assignment: null }; } return u; });
+
+      let zones = s.zones.map(z => {
+        if (z.evac === "ordered" && clock - z.orderedTick >= 3) { add("evac", `${z.name} evacuation complete · ${z.pop.toLocaleString()} residents safe`); return { ...z, evac: "complete" }; }
+        return z;
+      });
+
+      let firedEvents = s.firedEvents;
+      if (!firedEvents.includes("wind10") && clock >= 10) {
+        const snap = { ...s, incidents, zones }; const r = applyWind(incidents, zones, snap);
+        incidents = r.incidents; if (r.text) add("wind", r.text); firedEvents = [...firedEvents, "wind10"];
+      }
+
+      return { ...s, clock, units, incidents, zones, log, firedEvents };
+    }
+    default: return s;
+  }
+}
+
+/* ============================== UI =============================== */
+function Pill({ color, bg, children, mono }) {
+  return <span style={{ fontSize:10.5, fontWeight:600, color, background:bg, padding:"2px 7px", borderRadius:5, fontFamily: mono ? "ui-monospace,Menlo,monospace" : "inherit", letterSpacing: mono ? .2 : .3, whiteSpace:"nowrap" }}>{children}</span>;
+}
+function Bar({ value, color, h = 4 }) {
+  return <div style={{ height:h, background:"rgba(255,255,255,.06)", borderRadius:h, overflow:"hidden" }}><div style={{ width:`${Math.min(100,value)}%`, height:"100%", background:color, borderRadius:h, transition:"width .4s ease" }} /></div>;
+}
+function SectionLabel({ icon: Ico, children, right }) {
+  return <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"0 2px 8px" }}>
+    <div style={{ display:"flex", alignItems:"center", gap:7 }}>{Ico && <Ico size={12} color={C.mute} />}<span style={{ fontSize:10.5, fontWeight:700, letterSpacing:1.4, color:C.mute, textTransform:"uppercase" }}>{children}</span></div>
+    {right}
+  </div>;
+}
+function Kpi({ label, value, color, icon: Ico }) {
+  return <div style={{ minWidth:90, padding:"6px 11px", borderRadius:8, background:C.panel2, border:`1px solid ${C.line}` }}>
+    <div style={{ display:"flex", alignItems:"center", gap:5, marginBottom:2 }}><Ico size={11} color={C.faint} /><span style={{ fontSize:9, color:C.faint, letterSpacing:.5, textTransform:"uppercase", fontWeight:600 }}>{label}</span></div>
+    <div style={{ fontSize:17, fontWeight:800, color, fontFamily:"ui-monospace,Menlo,monospace", lineHeight:1 }}>{value}</div>
+  </div>;
+}
+function ObjGroup({ title, count, children }) {
+  return <div style={{ marginBottom:10 }}>
+    <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"0 4px 4px" }}>
+      <span style={{ fontSize:10, fontWeight:700, color:C.mute, letterSpacing:.5 }}>{title}</span>
+      <span style={{ fontSize:10, fontFamily:"ui-monospace,monospace", color:C.faint, background:C.panel2, padding:"1px 6px", borderRadius:5 }}>{count}</span>
+    </div>
+    <div style={{ display:"flex", flexDirection:"column", gap:1 }}>{children}</div>
+  </div>;
+}
+
+function MiniGraph({ center, neighbors, onPick }) {
+  const R = 34, cx = 50, cy = 50;
+  const pts = neighbors.map((n, i) => { const ang = (-90 + 360 / Math.max(1, neighbors.length) * i) * Math.PI / 180; return { ...n, px: cx + R*Math.cos(ang), py: cy + R*Math.sin(ang) }; });
+  return <svg viewBox="0 0 100 100" style={{ width:"100%", height:128 }}>
+    {pts.map((p, i) => <line key={"e"+i} x1={cx} y1={cy} x2={p.px} y2={p.py} stroke={C.line2} strokeWidth="0.5" />)}
+    {pts.map((p, i) => <g key={"n"+i} className="opx-chip" onClick={() => onPick(p)} style={{ cursor:"pointer" }}>
+      <circle cx={p.px} cy={p.py} r="3.4" fill={C.panel2} stroke={p.color} strokeWidth="0.9" />
+      <text x={p.px} y={p.py + (p.py > cy ? 9 : -5)} fill={C.mute} fontSize="3.6" textAnchor="middle" fontFamily="ui-monospace,monospace">{p.label}</text>
+    </g>)}
+    <circle cx={cx} cy={cy} r="5" fill={center.color} opacity="0.18" />
+    <circle cx={cx} cy={cy} r="4.4" fill={C.panel} stroke={center.color} strokeWidth="1.1" />
+    <text x={cx} y={cy + 1.4} fill={C.text} fontSize="3.6" textAnchor="middle" fontFamily="ui-monospace,monospace" fontWeight="700">{center.short}</text>
+  </svg>;
+}
+
+function Inspector({ o, type, s, links, onPick }) {
+  let center = { color: C.violet, short: (o.name || o.id || "").slice(0, 6) };
+  const rows = [];
+  if (type === "incident") {
+    const M = TYPE_META[o.type]; center = { color: o.status === "contained" ? C.green : sevColor(o.sev), short: (o.name || o.id).slice(0, 6) };
+    rows.push(["Type", M.label], ["Status", o.status], ["Severity", `${o.sev} / 5`], ["Threatened pop", o.popAtRisk.toLocaleString()]);
+    if (o.acres != null) rows.push(["Size", `${o.acres.toLocaleString()} ac`]);
+    rows.push(["Detected", fmtDate(o.date)]);
+  } else if (type === "unit") {
+    const M = UNIT_META[o.kind]; center = { color: o.status === "available" ? C.green : o.status === "enroute" ? C.blue : C.amber, short: o.id };
+    rows.push(["Type", M.label], ["Status", o.status], ["Capabilities", o.caps.join(", ")], ["Assignment", o.assignment ? (s.incidents.find(i => i.id === o.assignment)?.name || o.assignment) : "—"]);
+  } else if (type === "zone") {
+    center = { color: o.evac === "complete" ? C.green : isThreatened(s, o) ? C.red : C.mute, short: o.name.split(" ")[0] };
+    rows.push(["Population", o.pop.toLocaleString()], ["Risk class", o.risk], ["Threatened", isThreatened(s, o) ? "yes" : "no"], ["Evacuation", o.evac]);
+  } else if (type === "facility") {
+    const M = FAC_META[o.kind]; center = { color: C.green, short: o.name.split(" ")[0] };
+    rows.push(["Type", M.label], ["Capacity", o.cap.toLocaleString()], ["Current load", o.load.toLocaleString()]);
+  } else if (type === "sensor") {
+    const M = SENSOR_META[o.kind]; center = { color: o.live ? C.green : C.violet, short: o.id };
+    rows.push(["Feed", M.label], ["Reading", o.reading], ["Provenance", o.live ? "live" : "representative"]);
+  }
+  const live = type === "incident" && o.provenance === "live";
+
+  return <div style={{ background:C.panel2, border:`1px solid ${C.line}`, borderRadius:10, padding:12 }}>
+    <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8, flexWrap:"wrap" }}>
+      <span style={{ fontSize:12.5, fontWeight:800, fontFamily:"ui-monospace,monospace", color:C.text }}>{o.name || o.id}</span>
+      <span style={{ fontSize:9, color:C.faint, textTransform:"uppercase", letterSpacing:1, padding:"1px 6px", borderRadius:5, border:`1px solid ${C.line}` }}>{type}</span>
+      {live && <Pill color={C.green} bg={C.greenDim}>● LIVE · EONET</Pill>}
+      {type === "incident" && o.provenance === "rep" && <Pill color={C.mute} bg="rgba(255,255,255,.05)">representative</Pill>}
+    </div>
+    {type === "incident" && <div style={{ marginBottom:9 }}>
+      <div style={{ display:"flex", justifyContent:"space-between", fontSize:9.5, color:C.faint, marginBottom:3 }}><span>Containment</span><span style={{ fontFamily:"ui-monospace,monospace" }}>{Math.round(o.containment)}%</span></div>
+      <Bar value={o.containment} color={C.green} />
+    </div>}
+    <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"5px 10px", marginBottom: links.length ? 10 : 0 }}>
+      {rows.map(([k, v]) => <div key={k}>
+        <div style={{ fontSize:9, color:C.faint, textTransform:"uppercase", letterSpacing:.4 }}>{k}</div>
+        <div style={{ fontSize:11, fontWeight:600, color:C.text, textTransform: (k === "Status" || k === "Evacuation" || k === "Provenance") ? "capitalize" : "none" }}>{v}</div>
+      </div>)}
+    </div>
+    {type === "incident" && o.source && o.source.url && <a href={o.source.url} target="_blank" rel="noreferrer" className="opx-chip" style={{ display:"inline-flex", alignItems:"center", gap:5, fontSize:10, color:C.blue, textDecoration:"none", marginBottom:8 }}><ChevronRight size={11} /> Source: {o.source.id}</a>}
+    {links.length > 0 && <>
+      <div style={{ borderTop:`1px solid ${C.line}`, paddingTop:8 }}>
+        <div style={{ fontSize:9, color:C.faint, textTransform:"uppercase", letterSpacing:1, marginBottom:2 }}>Linked objects · {links.length}</div>
+        <MiniGraph center={center} neighbors={links} onPick={(p) => onPick(p.type, p.id)} />
+      </div>
+      <div style={{ display:"flex", flexWrap:"wrap", gap:5, marginTop:4 }}>
+        {links.map(l => <span key={l.type + l.id} className="opx-chip" onClick={() => onPick(l.type, l.id)} style={{ fontSize:10, fontFamily:"ui-monospace,monospace", color:l.color, background:"rgba(255,255,255,.04)", border:`1px solid ${C.line}`, padding:"2px 7px", borderRadius:5 }}>{l.label}</span>)}
+      </div>
+    </>}
+  </div>;
+}
+
+function RecCard({ r, onPick, dispatch }) {
+  const accent = r.blocked ? C.faint : r.kind === "evacuate" ? C.amber : C.violet;
+  return <div className="opx-fade" style={{ background:C.panel2, border:`1px solid ${C.line}`, borderLeft:`2px solid ${accent}`, borderRadius:9, padding:"10px 11px" }}>
+    <div style={{ display:"flex", alignItems:"center", gap:7, marginBottom:5 }}>
+      {r.blocked ? <ShieldAlert size={13} color={C.faint} /> : r.kind === "evacuate" ? <Users size={13} color={C.amber} /> : <Navigation size={13} color={C.violet} />}
+      <span style={{ fontSize:12, fontWeight:700, color: r.blocked ? C.mute : C.text, flex:1 }}>{r.title}</span>
+    </div>
+    <div style={{ fontSize:10.5, color:C.mute, lineHeight:1.5, marginBottom:8 }}>{r.why}</div>
+    <div style={{ display:"flex", flexWrap:"wrap", gap:4, marginBottom: r.blocked ? 0 : 9 }}>
+      {r.objs.map(o => <span key={o.type + o.id} className="opx-chip" onClick={() => onPick(o.type, o.id)} style={{ fontSize:9.5, fontFamily:"ui-monospace,monospace", color:C.faint, background:"rgba(255,255,255,.03)", border:`1px solid ${C.line}`, padding:"1px 6px", borderRadius:4 }}>{o.id}</span>)}
+    </div>
+    {!r.blocked && <button className="opx-btn" onClick={() => r.kind === "evacuate" ? dispatch({ type:"EVACUATE", zoneId:r.zoneId, facilityId:r.facilityId }) : dispatch({ type:"DISPATCH", unitId:r.unitId, incidentId:r.incidentId })}
+      style={{ width:"100%", padding:"7px 0", borderRadius:7, background: r.kind === "evacuate" ? C.amber : C.violet, color: r.kind === "evacuate" ? "#1a1205" : "#fff", fontSize:11.5, fontWeight:700, display:"flex", alignItems:"center", justifyContent:"center", gap:6 }}>
+      <CheckCircle2 size={13} />{r.kind === "evacuate" ? "Order evacuation" : `Dispatch ${r.unitId}`}
+    </button>}
+  </div>;
+}
+
+const LOG_META = { dispatch:{ c:C.violet, I:Navigation }, evac:{ c:C.amber, I:Users }, arrive:{ c:C.blue, I:MapPin }, contain:{ c:C.green, I:CheckCircle2 }, escalate:{ c:C.red, I:AlertTriangle }, detect:{ c:C.violet, I:Satellite }, wind:{ c:C.amber, I:Wind } };
+function LogRow({ l }) {
+  const M = LOG_META[l.kind] || { c:C.mute, I:Activity };
+  return <div className="opx-fade" style={{ display:"flex", gap:8, padding:"4px 6px", borderRadius:6, alignItems:"flex-start" }}>
+    <M.I size={12} color={M.c} style={{ marginTop:2, flexShrink:0 }} />
+    <span style={{ fontSize:10.5, color:C.text, lineHeight:1.45, flex:1 }}>{l.text}</span>
+    <span style={{ fontSize:9.5, color:C.faint, fontFamily:"ui-monospace,monospace", flexShrink:0 }}>{fmtClock(l.tick)}</span>
+  </div>;
+}
+
+/* ---- the live map (Leaflet basemap + ontology objects) ---------- */
+function incidentHTML(i, sel) {
+  const col = i.status === "contained" ? C.green : sevColor(i.sev);
+  const size = 18 + i.sev * 3;
+  const isSel = sel && sel.type === "incident" && sel.id === i.id;
+  const ring = (i.status === "active" && i.sev >= 4) ? `<div class="opx-pulse" style="position:absolute;inset:0;margin:auto;width:${size}px;height:${size}px;border-radius:50%;border:1.5px solid ${col}"></div>` : "";
+  const liveDot = i.provenance === "live" ? `<div style="position:absolute;top:-2px;right:-2px;width:6px;height:6px;border-radius:6px;background:${C.green};box-shadow:0 0 0 1.5px ${C.ink}"></div>` : "";
+  return `<div style="position:relative;width:${size}px;height:${size}px">
+    ${ring}
+    <div style="width:${size}px;height:${size}px;border-radius:50%;background:${i.status==="contained"?C.greenDim:"rgba(255,81,71,.18)"};border:1.5px solid ${col};display:grid;place-items:center;box-shadow:${isSel?`0 0 0 3px ${C.violetDim}`:"none"}">
+      <svg width="${size*0.5}" height="${size*0.5}" viewBox="0 0 24 24" fill="none" stroke="${col}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/></svg>
+    </div>${liveDot}
+    <div style="position:absolute;top:${size+1}px;left:50%;transform:translateX(-50%);font-size:9px;font-weight:700;color:${col};font-family:ui-monospace,monospace;white-space:nowrap;text-shadow:0 1px 3px #000">${i.name}</div>
+  </div>`;
+}
+const UNIT_PATH = {
+  engine:'<path d="M10 17h4V5H2v12h3"/><circle cx="7.5" cy="17.5" r="2.5"/><path d="M14 17h2.5a2.5 2.5 0 0 0 5 0H22V9.5L18 6h-4"/><circle cx="18.5" cy="17.5" r="2.5"/>',
+  ladder:'<path d="M10 17h4V5H2v12h3"/><circle cx="7.5" cy="17.5" r="2.5"/><path d="M14 17h2.5a2.5 2.5 0 0 0 5 0H22V9.5L18 6h-4"/><circle cx="18.5" cy="17.5" r="2.5"/>',
+  medic:'<path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/>',
+  air:'<path d="M17.8 19.2 16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5c-.2.5-.1 1 .3 1.3L9 12l-2 3H4l-1 1 3 2 2 3 1-1v-3l3-2 3.5 5.3c.3.4.8.5 1.3.3l.5-.2c.4-.3.6-.7.5-1.2z"/>',
+  hazmat:'<path d="M12 9v4"/><path d="M10.363 3.591 2.587 17.6a2 2 0 0 0 1.756 2.96h15.314a2 2 0 0 0 1.756-2.96L13.637 3.591a2 2 0 0 0-3.274 0z"/>',
+};
+function unitHTML(u, sel) {
+  const col = u.status === "available" ? C.green : u.status === "enroute" ? C.blue : C.amber;
+  const isSel = sel && sel.type === "unit" && sel.id === u.id;
+  return `<div style="display:flex;align-items:center;gap:3px;padding:2px 5px 2px 3px;border-radius:11px;background:${C.panel};border:1px solid ${isSel?C.violet:col};white-space:nowrap">
+    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="${col}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${UNIT_PATH[u.kind]||UNIT_PATH.engine}</svg>
+    <span style="font-size:8px;font-weight:700;color:${C.text};font-family:ui-monospace,monospace">${u.id}</span>
+  </div>`;
+}
+function facHTML(f, sel) {
+  const isSel = sel && sel.type === "facility" && sel.id === f.id;
+  const col = isSel ? C.green : C.mute;
+  return `<div style="width:18px;height:18px;border-radius:5px;background:${C.panel2};border:1px solid ${isSel?C.green:C.line2};display:grid;place-items:center">
+    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="${col}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z"/><path d="M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2"/><path d="M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2"/><path d="M10 6h4M10 10h4M10 14h4M10 18h4"/></svg>
+  </div>`;
+}
+
+function MapView({ s, sel, selObj, links, onPick }) {
+  const elRef = useRef(null), mapRef = useRef(null), layers = useRef(null), reg = useRef({}), fitted = useRef(false);
+
+  useEffect(() => {
+    if (mapRef.current || !elRef.current || !window.L) return;
+    const L = window.L;
+    const map = L.map(elRef.current, { zoomControl: true, attributionControl: true, preferCanvas: true, worldCopyJump: true });
+    map.setView([39.8, -121.7], 9);
+    L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", { attribution: '&copy; OpenStreetMap &copy; CARTO', subdomains: "abcd", maxZoom: 19 }).addTo(map);
+    layers.current = { zones: L.layerGroup().addTo(map), links: L.layerGroup().addTo(map), fac: L.layerGroup().addTo(map) };
+    mapRef.current = map;
+    setTimeout(() => map.invalidateSize(), 60);
+  }, []);
+
+  // fit once data exists
+  useEffect(() => {
+    const L = window.L, map = mapRef.current; if (!map || fitted.current) return;
+    const pts = [...s.incidents, ...s.units, ...s.zones].map(o => [o.lat, o.lng]);
+    if (pts.length) { map.invalidateSize(); map.fitBounds(L.latLngBounds(pts).pad(0.18)); fitted.current = true; }
+  }, [s.incidents, s.units, s.zones]);
+
+  // upsert markers
+  useEffect(() => {
+    const L = window.L, map = mapRef.current; if (!map) return;
+    const want = {};
+    s.incidents.forEach(i => want["inc:" + i.id] = { type: "incident", o: i });
+    s.units.forEach(u => want["unit:" + u.id] = { type: "unit", o: u });
+    Object.keys(reg.current).forEach(k => { if (!want[k]) { map.removeLayer(reg.current[k].marker); delete reg.current[k]; } });
+    Object.entries(want).forEach(([k, { type, o }]) => {
+      const ll = [o.lat, o.lng];
+      const html = type === "incident" ? incidentHTML(o, sel) : unitHTML(o, sel);
+      const selFlag = sel && sel.type === type && sel.id === o.id ? "1" : "0";
+      const sig = type === "incident" ? `${o.status}-${o.sev}-${selFlag}-${o.name}` : `${o.status}-${selFlag}`;
+      const size = type === "incident" ? (18 + o.sev * 3) : 0;
+      const icon = L.divIcon({ html, className: "aegis-div", iconSize: type === "incident" ? [size, size] : [60, 18], iconAnchor: type === "incident" ? [size/2, size/2] : [30, 9] });
+      let e = reg.current[k];
+      if (!e) {
+        const marker = L.marker(ll, { icon, keyboard: false, riseOnHover: true }).addTo(map);
+        marker.on("click", () => onPick(type, o.id));
+        if (type === "unit") requestAnimationFrame(() => { if (marker._icon) marker._icon.classList.add("aegis-anim"); });
+        reg.current[k] = { marker, sig };
+      } else {
+        e.marker.setLatLng(ll);
+        if (e.sig !== sig) { e.marker.setIcon(icon); e.sig = sig; if (type === "unit") requestAnimationFrame(() => { if (e.marker._icon) e.marker._icon.classList.add("aegis-anim"); }); }
+      }
+    });
+
+    // zones (rebuild)
+    const zg = layers.current.zones; zg.clearLayers();
+    s.zones.forEach(z => {
+      const thr = zoneThreatenedBy(s, z).length > 0;
+      const stroke = z.evac === "complete" ? C.green : z.evac === "ordered" ? C.amber : thr ? C.red : C.line2;
+      const fill = z.evac === "complete" ? C.green : thr ? C.red : C.mute;
+      L.circle([z.lat, z.lng], { radius: z.rKm * 1000, color: stroke, weight: 1, opacity: .8, fillColor: fill, fillOpacity: z.evac === "complete" ? .06 : thr ? .1 : .04, dashArray: z.evac === "ordered" ? "4 4" : null })
+        .addTo(zg).on("click", () => onPick("zone", z.id));
+      L.marker([z.lat, z.lng], { interactive: false, icon: L.divIcon({ className: "aegis-div", iconSize: [120, 26], iconAnchor: [60, 13],
+        html: `<div style="text-align:center;pointer-events:none"><div style="font-size:9.5px;font-weight:700;color:${z.evac==="complete"?C.green:C.mute};white-space:nowrap;text-shadow:0 1px 3px #000">${z.name}</div><div style="font-size:8.5px;color:${C.faint};font-family:ui-monospace,monospace">${z.pop.toLocaleString()}${z.evac==="ordered"?" · evac":z.evac==="complete"?" · safe":""}</div></div>` }) }).addTo(zg);
+    });
+
+    // facilities (rebuild)
+    const fg = layers.current.fac; fg.clearLayers();
+    s.facilities.forEach(f => L.marker([f.lat, f.lng], { icon: L.divIcon({ html: facHTML(f, sel), className: "aegis-div", iconSize: [18, 18], iconAnchor: [9, 9] }) }).addTo(fg).on("click", () => onPick("facility", f.id)));
+
+    // links (rebuild on selection)
+    const lg = layers.current.links; lg.clearLayers();
+    if (selObj) links.forEach(l => { if (l.lat != null) L.polyline([[selObj.lat, selObj.lng], [l.lat, l.lng]], { color: C.violet, weight: 1.5, opacity: .85, dashArray: "4 5" }).addTo(lg); });
+  }, [s, sel, selObj, links]);
+
+  return <div ref={elRef} style={{ position: "absolute", inset: 0 }} />;
+}
+
+function Legend() {
+  const items = [["Active", C.red], ["En route", C.blue], ["On scene", C.amber], ["Contained", C.green], ["Available", C.green]];
+  return <div style={{ position:"absolute", bottom:24, left:14, zIndex:500, display:"flex", gap:12, padding:"6px 11px", borderRadius:8, background:"rgba(15,20,27,.82)", border:`1px solid ${C.line}` }}>
+    {items.map(([t, c]) => <div key={t} style={{ display:"flex", alignItems:"center", gap:5 }}><span style={{ width:7, height:7, borderRadius:7, background:c }} /><span style={{ fontSize:9.5, color:C.mute }}>{t}</span></div>)}
+  </div>;
+}
+
+/* ---- operator brief (the hunch -> reality story) ---------------- */
+function Brief({ feed, onEnter }) {
+  const loading = !feed;
+  return <div style={{ position:"fixed", inset:0, zIndex:1000, background:"radial-gradient(120% 90% at 50% -10%, #131c27 0%, #080b10 70%)", display:"grid", placeItems:"center", padding:20, overflow:"auto" }}>
+    <div className="opx-fade" style={{ maxWidth:680, width:"100%", background:C.panel, border:`1px solid ${C.line}`, borderRadius:16, padding:"30px 34px" }}>
+      <div style={{ display:"flex", alignItems:"center", gap:11, marginBottom:18 }}>
+        <div style={{ width:30, height:30, borderRadius:8, background:`linear-gradient(135deg,${C.violet},#5b50d6)`, display:"grid", placeItems:"center" }}><Crosshair size={17} color="#fff" /></div>
+        <div>
+          <div style={{ fontSize:10, letterSpacing:2, color:C.violet, fontWeight:700, textTransform:"uppercase" }}>Forward deployment brief</div>
+          <div style={{ fontSize:19, fontWeight:800, letterSpacing:.3 }}>AEGIS · regional fire operations</div>
+        </div>
+      </div>
+
+      <div style={{ display:"flex", alignItems:"center", gap:8, padding:"9px 12px", borderRadius:9, background:C.panel2, border:`1px solid ${C.line}`, marginBottom:18 }}>
+        {loading ? <RefreshCw size={14} color={C.violet} className="opx-pulse" /> : <Wifi size={14} color={feed.mode === "live" ? C.green : C.amber} />}
+        <span style={{ fontSize:12, color:C.text, fontWeight:600 }}>
+          {loading ? "Connecting to NASA EONET…" : feed.mode === "live"
+            ? <>Live feed connected · <span style={{ fontFamily:"ui-monospace,monospace", color:C.green }}>{feed.count}</span> active wildfires · theater: <b>{feed.region}</b></>
+            : <>Offline — using cached sample · theater: <b>{feed.region}</b></>}
+        </span>
+      </div>
+
+      <p style={{ fontSize:13.5, lineHeight:1.65, color:C.text, marginTop:0 }}>
+        You are the duty officer for a regional emergency-operations center. Three systems sit on three different screens: <b>CAD dispatch</b> knows where your engines are, the <b>agency GIS</b> knows where people live, and a <b>satellite feed</b> knows where the fire is. None of them talk to each other.
+      </p>
+      <p style={{ fontSize:13.5, lineHeight:1.65, color:C.mute }}>
+        When the wind turns, someone reconciles all three by hand. By the time the spreadsheet is current, the fire has moved and the evacuation order is late. The hunch: if these were one operating picture, decisions would be faster — and fewer people would be in the fire's path.
+      </p>
+      <p style={{ fontSize:13.5, lineHeight:1.65, color:C.text }}>
+        AEGIS fuses the feeds into one <b>ontology</b> of incidents, units, zones, and facilities; an <b>agent</b> reasons over that object graph to recommend the next action; you approve; the decision <b>writes back</b> and the loop is measured live.
+      </p>
+
+      <div style={{ display:"flex", alignItems:"flex-start", gap:8, padding:"10px 12px", borderRadius:9, background:"rgba(142,132,255,.07)", border:`1px solid ${C.line}`, margin:"16px 0 22px" }}>
+        <GitBranch size={14} color={C.violet} style={{ marginTop:1, flexShrink:0 }} />
+        <span style={{ fontSize:11.5, color:C.mute, lineHeight:1.55 }}>
+          <b style={{ color:C.green }}>Live data:</b> wildfire incidents are real, pulled now from NASA EONET (VIIRS/MODIS satellite detections). <b style={{ color:C.text }}>Representative:</b> units, facilities, and population zones stand in for the agency's internal CAD/GIS — the systems you'd connect on a real deployment.
+        </span>
+      </div>
+
+      <button className="opx-btn" disabled={loading} onClick={onEnter}
+        style={{ width:"100%", padding:"12px 0", borderRadius:10, background: loading ? C.panel2 : C.violet, color: loading ? C.faint : "#fff", fontSize:13.5, fontWeight:700, display:"flex", alignItems:"center", justifyContent:"center", gap:8, cursor: loading ? "default" : "pointer" }}>
+        {loading ? "Loading theater…" : <>Enter operations center <ArrowRight size={16} /></>}
+      </button>
+    </div>
+  </div>;
+}
+
+/* ============================== APP ============================== */
+function App() {
+  const [s, dispatch] = useReducer(reducer, null, () => ({ phase: "boot", incidents: [], units: [], facilities: [], zones: [], sensors: [], log: [], feed: null, clock: 0, running: false, selected: null, firedEvents: [] }));
+  const raw = useRef(null);
+
+  // fetch live fires once on mount
+  useEffect(() => {
+    let alive = true;
+    fetchFires().then(res => { if (!alive) return; raw.current = res.fires; const world = buildWorld(res); world.__rawFires = res.fires; dispatch({ type: "SET_WORLD", world }); });
+    return () => { alive = false; };
+  }, []);
+
+  // sim clock (only while in ops + running)
+  useEffect(() => {
+    if (s.phase !== "ops" || !s.running) return;
+    const t = setInterval(() => dispatch({ type: "TICK" }), 1400);
+    return () => clearInterval(t);
+  }, [s.phase, s.running]);
+
+  const resync = () => fetchFires().then(res => { raw.current = res.fires; dispatch({ type: "RESYNC", fires: res.fires, mode: res.mode, count: res.fires.length, error: res.error }); });
+
+  const metrics = useMemo(() => {
+    if (s.phase === "boot") return { atRisk: 0, avg: null, active: 0, rate: 0, avail: 0, units: 0 };
+    const atRisk = s.zones.filter(z => isThreatened(s, z) && z.evac !== "complete").reduce((a, z) => a + z.pop, 0);
+    const resolved = s.incidents.filter(i => i.arrivedTick != null);
+    const avg = resolved.length ? Math.round(resolved.reduce((a, i) => a + (i.arrivedTick - i.detectedTick), 0) / resolved.length) : null;
+    const active = s.incidents.filter(i => i.status === "active").length;
+    const contained = s.incidents.filter(i => i.status === "contained").length;
+    const total = s.incidents.length || 1;
+    const avail = s.units.filter(u => u.status === "available").length;
+    return { atRisk, avg, active, rate: Math.round(contained / total * 100), avail, units: s.units.length };
+  }, [s]);
+
+  const recs = useMemo(() => (s.phase === "boot" ? [] : genRecs(s)), [s]);
+  const sel = s.selected;
+  const pick = (type, id) => dispatch({ type: "SELECT", sel: { type, id } });
+  const feedLoad = (sid) => s.incidents.filter(i => i.status === "active" && i.sources.includes(sid)).length;
+
+  const selObj = useMemo(() => {
+    if (!sel) return null;
+    const bag = { incident: s.incidents, unit: s.units, zone: s.zones, facility: s.facilities, sensor: s.sensors }[sel.type];
+    return bag?.find(o => o.id === sel.id) || null;
+  }, [sel, s]);
+
+  function linksFor(o, type) {
+    if (!o) return [];
+    if (type === "incident") {
+      const out = [];
+      o.sources.forEach(sid => { const x = s.sensors.find(z => z.id === sid); if (x) out.push({ type:"sensor", id:x.id, lat:null, lng:null, label:x.id, color: x.live ? C.green : C.violet }); });
+      o.threatens.forEach(zid => { const x = s.zones.find(z => z.id === zid); if (x) out.push({ type:"zone", id:x.id, lat:x.lat, lng:x.lng, label:x.name.split(" ")[0], color:C.amber }); });
+      s.units.filter(u => u.assignment === o.id).forEach(u => out.push({ type:"unit", id:u.id, lat:u.lat, lng:u.lng, label:u.id, color:C.blue }));
+      const f = nearestFacility(s, o, null); if (f) out.push({ type:"facility", id:f.id, lat:f.lat, lng:f.lng, label:f.name.split(" ")[0], color:C.green });
+      return out;
+    }
+    if (type === "unit" && o.assignment) { const i = s.incidents.find(x => x.id === o.assignment); return i ? [{ type:"incident", id:i.id, lat:i.lat, lng:i.lng, label:i.name.slice(0,6), color:sevColor(i.sev) }] : []; }
+    if (type === "zone") {
+      const out = zoneThreatenedBy(s, o).map(i => ({ type:"incident", id:i.id, lat:i.lat, lng:i.lng, label:i.name.slice(0,6), color:sevColor(i.sev) }));
+      if (o.evacFacility) { const f = s.facilities.find(f => f.id === o.evacFacility); if (f) out.push({ type:"facility", id:f.id, lat:f.lat, lng:f.lng, label:f.name.split(" ")[0], color:C.green }); }
+      return out;
+    }
+    if (type === "facility") return s.zones.filter(z => z.evacFacility === o.id).map(z => ({ type:"zone", id:z.id, lat:z.lat, lng:z.lng, label:z.name.split(" ")[0], color:C.amber }));
+    if (type === "sensor") return s.incidents.filter(i => i.sources.includes(o.id)).map(i => ({ type:"incident", id:i.id, lat:i.lat, lng:i.lng, label:i.name.slice(0,6), color:sevColor(i.sev) }));
+    return [];
+  }
+  const links = selObj ? linksFor(selObj, sel.type) : [];
+
+  return <div style={{ fontFamily:"ui-sans-serif,system-ui,sans-serif", background:C.ink, color:C.text, height:"100vh", minHeight:640, display:"flex", flexDirection:"column", overflow:"hidden" }}>
+    {s.phase !== "ops" && <Brief feed={s.feed} onEnter={() => dispatch({ type: "ENTER" })} />}
+
+    {/* top bar */}
+    <div style={{ display:"flex", alignItems:"center", gap:16, padding:"10px 16px", borderBottom:`1px solid ${C.line}`, background:C.panel, flexWrap:"wrap" }}>
+      <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+        <div style={{ width:26, height:26, borderRadius:7, background:`linear-gradient(135deg,${C.violet},#5b50d6)`, display:"grid", placeItems:"center" }}><Crosshair size={15} color="#fff" /></div>
+        <div>
+          <div style={{ fontSize:13.5, fontWeight:800, letterSpacing:.5 }}>AEGIS</div>
+          <div style={{ fontSize:9.5, color:C.faint, letterSpacing:1.2, marginTop:-1, textTransform:"uppercase" }}>{s.feed ? s.feed.region : "ontology-driven response"}</div>
+        </div>
+      </div>
+      <div style={{ display:"flex", alignItems:"center", gap:7, padding:"5px 10px", borderRadius:7, background:C.panel2, border:`1px solid ${C.line}`, fontFamily:"ui-monospace,monospace" }}>
+        <Clock size={12} color={C.mute} /><span style={{ fontSize:13, fontWeight:700 }}>{fmtClock(s.clock)}</span><span style={{ fontSize:9.5, color:C.faint }}>OP CLOCK</span>
+      </div>
+      <button className="opx-btn" onClick={() => dispatch({ type:"TOGGLE_RUN" })} style={{ display:"flex", alignItems:"center", gap:6, padding:"6px 11px", borderRadius:7, background: s.running ? C.panel2 : C.violet, color: s.running ? C.text : "#fff", fontSize:11.5, fontWeight:700, border:`1px solid ${s.running?C.line:C.violet}` }}>{s.running ? <Pause size={13} /> : <Play size={13} />}{s.running ? "Pause" : "Resume"}</button>
+      <button className="opx-btn" onClick={() => dispatch({ type:"WIND" })} style={{ display:"flex", alignItems:"center", gap:6, padding:"6px 11px", borderRadius:7, background:C.panel2, color:C.amber, fontSize:11.5, fontWeight:700, border:`1px solid ${C.line}` }}><Wind size={13} />Inject wind shift</button>
+      <button className="opx-btn" onClick={() => dispatch({ type:"RESET" })} style={{ display:"flex", alignItems:"center", gap:6, padding:"6px 9px", borderRadius:7, background:"transparent", color:C.mute, fontSize:11.5, fontWeight:600, border:`1px solid ${C.line}` }}><RotateCcw size={12} />Reset</button>
+      <div style={{ flex:1 }} />
+      <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
+        <Kpi label="Residents at risk" value={metrics.atRisk.toLocaleString()} color={metrics.atRisk > 0 ? C.red : C.green} icon={Users} />
+        <Kpi label="Avg response" value={metrics.avg == null ? "—" : `${metrics.avg} min`} color={C.blue} icon={Activity} />
+        <Kpi label="Active" value={metrics.active} color={metrics.active ? C.amber : C.green} icon={AlertTriangle} />
+        <Kpi label="Contained" value={`${metrics.rate}%`} color={C.green} icon={CheckCircle2} />
+        <Kpi label="Units free" value={`${metrics.avail}/${metrics.units}`} color={C.text} icon={Truck} />
+      </div>
+    </div>
+
+    {/* body */}
+    <div style={{ flex:1, display:"grid", gridTemplateColumns:"304px 1fr 340px", minHeight:0 }}>
+
+      {/* LEFT */}
+      <div className="opx-scroll" style={{ borderRight:`1px solid ${C.line}`, overflowY:"auto", padding:14, display:"flex", flexDirection:"column", gap:18 }}>
+        <div>
+          <SectionLabel icon={Database} right={<button className="opx-btn" onClick={resync} title="Re-fetch EONET" style={{ display:"flex", alignItems:"center", gap:4, fontSize:9.5, color:C.violet, background:"rgba(142,132,255,.1)", border:`1px solid ${C.line}`, borderRadius:6, padding:"3px 7px", fontWeight:700 }}><RefreshCw size={10} />Resync</button>}>Data integration · feeds</SectionLabel>
+          <div style={{ display:"flex", flexDirection:"column", gap:2 }}>
+            {s.sensors.map(se => {
+              const M = SENSOR_META[se.kind]; const load = feedLoad(se.id); const active = selObj && links.some(l => l.type === "sensor" && l.id === se.id);
+              return <div key={se.id} className="opx-row" onClick={() => pick("sensor", se.id)} style={{ display:"flex", alignItems:"center", gap:9, padding:"6px 8px", borderRadius:7, background: active ? C.violetDim : "transparent", border:`1px solid ${active ? "rgba(142,132,255,.4)" : "transparent"}` }}>
+                <M.icon size={13} color={se.live ? C.green : (load ? C.violet : C.faint)} />
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ fontSize:11.5, fontWeight:600, fontFamily:"ui-monospace,monospace", color:C.text }}>{se.id}</div>
+                  <div style={{ fontSize:9.5, color:C.faint, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{M.label}</div>
+                </div>
+                {se.live ? <Pill color={C.green} bg={C.greenDim}>● LIVE</Pill> : <Pill color={C.faint} bg="rgba(255,255,255,.04)">repr.</Pill>}
+              </div>;
+            })}
+          </div>
+          {s.feed && <div style={{ display:"flex", alignItems:"center", gap:6, marginTop:8, padding:"6px 8px", borderRadius:6, background:C.panel2, fontSize:9.5, color:C.faint }}>
+            <ChevronRight size={11} color={C.faint} /> {s.feed.mode === "live" ? `${s.feed.count} EONET events ingested` : "offline cache"} · synced {new Date(s.feed.syncedAt).toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" })}
+          </div>}
+        </div>
+
+        {selObj && <div className="opx-fade"><SectionLabel icon={GitBranch}>Inspector · object graph</SectionLabel><Inspector o={selObj} type={sel.type} s={s} links={links} onPick={pick} /></div>}
+
+        <div>
+          <SectionLabel icon={Crosshair}>Ontology · objects</SectionLabel>
+          <ObjGroup title="Incidents" count={s.incidents.length}>
+            {s.incidents.map(i => { const M = TYPE_META[i.type]; const active = sel?.type === "incident" && sel.id === i.id;
+              return <div key={i.id} className="opx-row" onClick={() => pick("incident", i.id)} style={{ display:"flex", alignItems:"center", gap:9, padding:"6px 8px", borderRadius:7, background: active ? "rgba(255,255,255,.05)" : "transparent" }}>
+                <M.icon size={14} color={i.status === "contained" ? C.green : sevColor(i.sev)} />
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ fontSize:11.5, fontWeight:600, display:"flex", alignItems:"center", gap:5 }}>{i.name}{i.provenance === "live" && <span style={{ width:5, height:5, borderRadius:5, background:C.green }} />}</div>
+                  <div style={{ fontSize:9.5, color:C.faint }}>{M.label}{i.acres ? ` · ${i.acres.toLocaleString()} ac` : ""}</div>
+                </div>
+                {i.status === "contained" ? <Pill color={C.green} bg={C.greenDim}>Contained</Pill> : <Pill color={sevColor(i.sev)} bg={i.sev >= 4 ? C.redDim : C.amberDim}>SEV {i.sev}</Pill>}
+              </div>;
+            })}
+          </ObjGroup>
+          <ObjGroup title="Response units" count={s.units.length}>
+            {s.units.map(u => { const M = UNIT_META[u.kind]; const active = sel?.type === "unit" && sel.id === u.id; const col = u.status === "available" ? C.green : u.status === "enroute" ? C.blue : C.amber;
+              return <div key={u.id} className="opx-row" onClick={() => pick("unit", u.id)} style={{ display:"flex", alignItems:"center", gap:9, padding:"6px 8px", borderRadius:7, background: active ? "rgba(255,255,255,.05)" : "transparent" }}>
+                <M.icon size={14} color={col} />
+                <div style={{ flex:1, minWidth:0 }}><div style={{ fontSize:11.5, fontWeight:600, fontFamily:"ui-monospace,monospace" }}>{u.id}</div><div style={{ fontSize:9.5, color:C.faint }}>{u.caps.join(" · ")}</div></div>
+                <Pill color={col} bg={u.status === "available" ? C.greenDim : u.status === "enroute" ? C.blueDim : C.amberDim}>{u.status}</Pill>
+              </div>;
+            })}
+          </ObjGroup>
+          <ObjGroup title="Population zones" count={s.zones.length}>
+            {s.zones.map(z => { const thr = isThreatened(s, z); const active = sel?.type === "zone" && sel.id === z.id; const col = z.evac === "complete" ? C.green : thr ? C.red : C.mute;
+              return <div key={z.id} className="opx-row" onClick={() => pick("zone", z.id)} style={{ display:"flex", alignItems:"center", gap:9, padding:"6px 8px", borderRadius:7, background: active ? "rgba(255,255,255,.05)" : "transparent" }}>
+                <Users size={14} color={col} />
+                <div style={{ flex:1, minWidth:0 }}><div style={{ fontSize:11.5, fontWeight:600 }}>{z.name}</div><div style={{ fontSize:9.5, color:C.faint, fontFamily:"ui-monospace,monospace" }}>{z.pop.toLocaleString()} ppl</div></div>
+                {z.evac === "complete" ? <Pill color={C.green} bg={C.greenDim}>Safe</Pill> : z.evac === "ordered" ? <Pill color={C.amber} bg={C.amberDim}>Evac</Pill> : thr ? <Pill color={C.red} bg={C.redDim}>Threatened</Pill> : null}
+              </div>;
+            })}
+          </ObjGroup>
+          <ObjGroup title="Facilities" count={s.facilities.length}>
+            {s.facilities.map(f => { const M = FAC_META[f.kind]; const active = sel?.type === "facility" && sel.id === f.id;
+              return <div key={f.id} className="opx-row" onClick={() => pick("facility", f.id)} style={{ display:"flex", alignItems:"center", gap:9, padding:"6px 8px", borderRadius:7, background: active ? "rgba(255,255,255,.05)" : "transparent" }}>
+                <M.icon size={14} color={C.mute} />
+                <div style={{ flex:1, minWidth:0 }}><div style={{ fontSize:11.5, fontWeight:600 }}>{f.name}</div><div style={{ fontSize:9.5, color:C.faint }}>{M.label}{f.cap ? ` · cap ${f.cap}` : ""}</div></div>
+              </div>;
+            })}
+          </ObjGroup>
+        </div>
+      </div>
+
+      {/* CENTER: live map */}
+      <div style={{ position:"relative", minWidth:0 }}>
+        {s.phase !== "boot" && <MapView s={s} sel={sel} selObj={selObj} links={links} onPick={pick} />}
+        <div style={{ position:"absolute", top:12, left:14, zIndex:500, display:"flex", alignItems:"center", gap:8, padding:"5px 10px", borderRadius:8, background:"rgba(15,20,27,.82)", border:`1px solid ${C.line}` }}>
+          <Radar size={13} color={C.violet} />
+          <span style={{ fontSize:10, fontWeight:700, letterSpacing:1.2, color:C.mute, textTransform:"uppercase" }}>Operational picture</span>
+          <span style={{ fontSize:9.5, color:C.faint }}>· {metrics.active} active</span>
+          {s.feed && <span style={{ display:"flex", alignItems:"center", gap:4, fontSize:9.5, color: s.feed.mode === "live" ? C.green : C.amber, fontWeight:600 }}><span style={{ width:6, height:6, borderRadius:6, background: s.feed.mode === "live" ? C.green : C.amber }} className="opx-pulse" />{s.feed.mode === "live" ? "EONET LIVE" : "CACHE"}</span>}
+        </div>
+        <Legend />
+      </div>
+
+      {/* RIGHT: agent + write-back */}
+      <div style={{ borderLeft:`1px solid ${C.line}`, display:"flex", flexDirection:"column", minHeight:0, background:C.panel }}>
+        <div style={{ padding:"12px 14px 10px", borderBottom:`1px solid ${C.line}` }}>
+          <div style={{ display:"flex", alignItems:"center", gap:9 }}>
+            <div style={{ width:24, height:24, borderRadius:6, background:C.violetDim, display:"grid", placeItems:"center" }}><Cpu size={14} color={C.violet} /></div>
+            <div style={{ flex:1 }}><div style={{ fontSize:12.5, fontWeight:800 }}>AIP Agent</div><div style={{ fontSize:9.5, color:C.faint }}>Recommendations grounded in the ontology</div></div>
+            <span style={{ display:"flex", alignItems:"center", gap:5, fontSize:9.5, color:C.violet, fontWeight:600 }}><span style={{ width:6, height:6, borderRadius:6, background:C.violet }} className={s.running ? "opx-pulse" : ""} />LIVE</span>
+          </div>
+        </div>
+        <div className="opx-scroll" style={{ overflowY:"auto", padding:12, display:"flex", flexDirection:"column", gap:9, flex:"0 1 auto", maxHeight:"52%" }}>
+          {recs.length === 0 && <div style={{ padding:"22px 12px", textAlign:"center", color:C.faint, fontSize:11.5, lineHeight:1.6 }}><CheckCircle2 size={22} color={C.green} style={{ marginBottom:8 }} /><br />No actions required.<br />Every active incident has a capable unit assigned.</div>}
+          {recs.map(r => <RecCard key={r.id} r={r} onPick={pick} dispatch={dispatch} />)}
+        </div>
+        <div style={{ borderTop:`1px solid ${C.line}`, padding:"10px 14px 8px" }}><SectionLabel icon={Activity} right={<span style={{ fontSize:9.5, color:C.faint }}>{s.log.length}</span>}>Write-back · operations log</SectionLabel></div>
+        <div className="opx-scroll" style={{ overflowY:"auto", padding:"0 12px 12px", flex:1, display:"flex", flexDirection:"column", gap:4 }}>
+          {s.log.length === 0 && <div style={{ fontSize:11, color:C.faint, padding:"8px 4px" }}>Approve a recommendation to act. Actions write back to the ontology and appear here.</div>}
+          {s.log.map(l => <LogRow key={l.id} l={l} />)}
+        </div>
+      </div>
+    </div>
+  </div>;
+}
+
+createRoot(document.getElementById("root")).render(<App />);
+</script>
+
+<!-- Babel Standalone (loaded last) transforms the text/babel module above -->
+<script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+</body>
+</html>
